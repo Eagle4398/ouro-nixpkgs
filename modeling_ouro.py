@@ -153,8 +153,9 @@ class UniversalTransformerCache(Cache):
         self._value_cache = value
 
     def get_mask_sizes(self, cache_position, layer_idx=None):
-        kv_length = self.get_seq_length(layer_idx if layer_idx is not None else 0)
-        kv_offset = 0
+        seq_len = self._seen_tokens
+        kv_length = seq_len + len(cache_position)
+        kv_offset = seq_len
         return kv_length, kv_offset
 
     def update(
