@@ -1,10 +1,10 @@
 { pkgs, quantization_bits ? null, model ? "2.6B", ... }:
 let
-  ouro-model = import ./ouro-model.nix { 
-    inherit pkgs; 
+  ouro-model = import ./ouro-model.nix {
+    inherit pkgs;
     model = model;
   };
-  
+
   quantConfig = if quantization_bits == 8 then ''
     quantization_config = BitsAndBytesConfig(load_in_8bit=True)
   '' else if quantization_bits == 4 then ''
@@ -12,39 +12,54 @@ let
   '' else ''
     quantization_config = None
   '';
-  
+
   modelLoadArgs = if quantization_bits != null then ''
     quantization_config=quantization_config,
-  '' else "";
+  '' else
+    "";
 
-  python-env = pkgs.python3.withPackages (ps: [
-    (ps.transformers.overridePythonAttrs (old: rec {
-      version = "4.54.1";
-      src = ps.fetchPypi {
-        pname = "transformers";
-        inherit version;
-        hash = "";
-      };
-    }))
-    ps.torch-bin
-    ps.flask
-  ] ++ pkgs.lib.optional (quantization_bits != null) ps.bitsandbytes);
+  # I do not know who I need to murder but why is libnvshmem, which is for 
+  # multi-GPU training not cached ANYWHERE. I am skipping this as this package 
+  # is geniunely only for local single-gpu inference
+  torch-bin-custom = pkgs.python3.pkgs.torch-bin.overridePythonAttrs (old: {
+    buildInputs = pkgs.lib.filter (x: x != pkgs.cudaPackages.libnvshmem)
+      (old.buildInputs or [ ]); 
+    autoPatchelfIgnoreMissingDeps = (old.autoPatchelfIgnoreMissingDeps or [ ])
+      ++ [ "libnvshmem.so.3" ];
+  });
+
+  python-env = pkgs.python3.withPackages (ps:
+    [
+      (ps.transformers.overridePythonAttrs (old: rec {
+        version = "4.54.1";
+        src = ps.fetchPypi {
+          pname = "transformers";
+          inherit version;
+          hash = "";
+        };
+      }))
+      torch-bin-custom
+      ps.flask
+    ] ++ pkgs.lib.optional (quantization_bits != null) ps.bitsandbytes);
 
   ouro-server-script = pkgs.writers.writePython3 "ouro-server" {
-    libraries = with python-env.pkgs; [ transformers torch-bin flask ] 
-      ++ pkgs.lib.optional (quantization_bits != null) python-env.pkgs.bitsandbytes;
+    libraries = with python-env.pkgs;
+      [ transformers torch-bin-custom flask ]
+      ++ pkgs.lib.optional (quantization_bits != null)
+      python-env.pkgs.bitsandbytes;
   } ''
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    ${pkgs.lib.optionalString (quantization_bits != null) "from transformers import BitsAndBytesConfig"}
+    ${pkgs.lib.optionalString (quantization_bits != null)
+    "from transformers import BitsAndBytesConfig"}
     from flask import Flask, request, jsonify
     import torch
 
     app = Flask(__name__)
-    
+
     print(f"CUDA available: {torch.cuda.is_available()}")
-    
+
     ${quantConfig}
-    
+
     model = AutoModelForCausalLM.from_pretrained(
         "${ouro-model}",
         device_map="auto",
