@@ -30,6 +30,7 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from transformers.utils.generic import check_model_inputs
 from .configuration_ouro import OuroConfig
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,33 +131,12 @@ class UniversalTransformerCache(Cache):
 
     def __init__(self, max_cache_size: Optional[int] = None):
         # We intentionally don't call super().__init__ because the parent assumes static cache sizes.
-        self._key_cache: list[Optional[torch.Tensor]] = []
-        self._value_cache: list[Optional[torch.Tensor]] = []
+        self.k_cache: list[Optional[torch.Tensor]] = []  # Renamed from key_cache
+        self.v_cache: list[Optional[torch.Tensor]] = []  # Renamed from value_cache
+
         self.layers: list[Any] = []  # attribute expected by HF Cache utilities
         self._seen_tokens = 0
         self.max_cache_size = max_cache_size
-
-    @property
-    def key_cache(self):
-        return self._key_cache
-
-    @key_cache.setter
-    def key_cache(self, value):
-        self._key_cache = value
-
-    @property
-    def value_cache(self):
-        return self._value_cache
-
-    @value_cache.setter
-    def value_cache(self, value):
-        self._value_cache = value
-
-    def get_mask_sizes(self, cache_position, layer_idx=None):
-        seq_len = self._seen_tokens
-        kv_length = seq_len + len(cache_position)
-        kv_offset = seq_len
-        return kv_length, kv_offset
 
     def update(
         self,
@@ -175,16 +155,17 @@ class UniversalTransformerCache(Cache):
             )
 
         # Expand cache storage so the requested index is available.
-        while len(self.key_cache) <= layer_idx:
-            self.key_cache.append(None)
-            self.value_cache.append(None)
+        # CHANGED: key_cache -> k_cache, value_cache -> v_cache
+        while len(self.k_cache) <= layer_idx:
+            self.k_cache.append(None)
+            self.v_cache.append(None)
 
-        cached_key = self.key_cache[layer_idx]
-        cached_value = self.value_cache[layer_idx]
+        cached_key = self.k_cache[layer_idx]
+        cached_value = self.v_cache[layer_idx]
 
         if cached_key is None:
-            self.key_cache[layer_idx] = key_states
-            self.value_cache[layer_idx] = value_states
+            self.k_cache[layer_idx] = key_states
+            self.v_cache[layer_idx] = value_states
         else:
             if (
                 key_states.shape[0] != cached_key.shape[0]
@@ -195,11 +176,11 @@ class UniversalTransformerCache(Cache):
                     "Cached and incoming key/value tensors must match on batch, head, and head_dim dimensions."
                 )
             assert cached_value is not None
-            self.key_cache[layer_idx] = torch.cat([cached_key, key_states], dim=2)
-            self.value_cache[layer_idx] = torch.cat([cached_value, value_states], dim=2)
+            self.k_cache[layer_idx] = torch.cat([cached_key, key_states], dim=2)
+            self.v_cache[layer_idx] = torch.cat([cached_value, value_states], dim=2)
 
-        result_key = self.key_cache[layer_idx]
-        result_value = self.value_cache[layer_idx]
+        result_key = self.k_cache[layer_idx]
+        result_value = self.v_cache[layer_idx]
         assert result_key is not None and result_value is not None
 
         # Track sequence length using the first populated cache entry.
@@ -209,12 +190,21 @@ class UniversalTransformerCache(Cache):
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         if layer_idx is None:
             layer_idx = 0
-        if layer_idx < 0 or len(self.key_cache) <= layer_idx:
+        # CHANGED: key_cache -> k_cache
+        if layer_idx < 0 or len(self.k_cache) <= layer_idx:
             return 0
-        cached = self.key_cache[layer_idx]
+        cached = self.k_cache[layer_idx]
         if cached is None:
             return 0
         return cached.shape[2]
+
+    def get_mask_sizes(self, cache_position, layer_idx: int = 0) -> tuple[int, int]:
+        # If cache is empty (prefill), determine length from cache_position
+        if self.get_seq_length(layer_idx) == 0:
+            if cache_position is not None and len(cache_position) > 0:
+                return cache_position[-1].item() + 1, 0
+
+        return self.get_seq_length(layer_idx), 0
 
     def get_max_length(self) -> Optional[int]:
         return None
@@ -225,15 +215,16 @@ class UniversalTransformerCache(Cache):
         return self.get_seq_length(layer_idx)
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
+        # CHANGED: key_cache -> k_cache, value_cache -> v_cache
         for idx, (key_entry, value_entry) in enumerate(
-            zip(self.key_cache, self.value_cache)
+            zip(self.k_cache, self.v_cache)
         ):
             if key_entry is None:
                 continue
             assert value_entry is not None
             device = key_entry.device
-            self.key_cache[idx] = key_entry.index_select(0, beam_idx.to(device))
-            self.value_cache[idx] = value_entry.index_select(0, beam_idx.to(device))
+            self.k_cache[idx] = key_entry.index_select(0, beam_idx.to(device))
+            self.v_cache[idx] = value_entry.index_select(0, beam_idx.to(device))
 
     @property
     def is_compileable(self) -> bool:
@@ -241,10 +232,10 @@ class UniversalTransformerCache(Cache):
 
     def clear(self) -> None:
         logger.debug("Clearing UniversalTransformerCache")
-        self.key_cache = []
-        self.value_cache = []
+        # CHANGED: key_cache -> k_cache, value_cache -> v_cache
+        self.k_cache = []
+        self.v_cache = []
         self._seen_tokens = 0
-
 
 def eager_attention_forward(
     module: nn.Module,
@@ -483,7 +474,7 @@ class OuroRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-    @torch.no_grad()
+    @torch .no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         inv_freq_expanded = (

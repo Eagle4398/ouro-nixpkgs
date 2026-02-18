@@ -1,4 +1,4 @@
-{ pkgs, model ? "2.6B", total_ut_steps ? 3 }:
+{ pkgs, model ? "2.6B", total_ut_steps ? 4 }:
 let
   modelSpecs = {
     "2.6B" = {
@@ -31,11 +31,12 @@ let
       ln -s "$f" $out/$(basename "$f")
     done
 
-    rm $out/config.json $out/modeling_ouro.py
+    rm $out/config.json 
 
     jq '.total_ut_steps = ${toString total_ut_steps}' \
       ${ouro-model-raw}/config.json > $out/config.json
 
+    rm  $out/modeling_ouro.py
     cp ${./modeling_ouro.py} $out/modeling_ouro.py
   '';
 in ouro-model
