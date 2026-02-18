@@ -25,10 +25,17 @@ let
   ouro-model = pkgs.runCommand "ouro-model-configured" {
     nativeBuildInputs = [ pkgs.jq ];
   } ''
-    cp -r ${ouro-model-raw} $out
-    chmod +w $out/config.json
-    jq '.total_ut_steps = ${
-      toString total_ut_steps
-    }' ${ouro-model-raw}/config.json > $out/config.json
+    mkdir -p $out
+
+    for f in ${ouro-model-raw}/*; do
+      ln -s "$f" $out/$(basename "$f")
+    done
+
+    rm $out/config.json $out/modeling_ouro.py
+
+    jq '.total_ut_steps = ${toString total_ut_steps}' \
+      ${ouro-model-raw}/config.json > $out/config.json
+
+    cp ${./modeling_ouro.py} $out/modeling_ouro.py
   '';
 in ouro-model

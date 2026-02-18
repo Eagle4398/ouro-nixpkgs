@@ -18,67 +18,89 @@ let
   '' else
     "";
 
-  # I do not know who I need to murder but why is libnvshmem, which is for 
-  # multi-GPU training not cached ANYWHERE. I am skipping this as this package 
-  # is geniunely only for local single-gpu inference
-  torch-bin-custom = pkgs.python3.pkgs.torch-bin.overridePythonAttrs (old: {
-    buildInputs = pkgs.lib.filter (x: x != pkgs.cudaPackages.libnvshmem)
-      (old.buildInputs or [ ]); 
-    autoPatchelfIgnoreMissingDeps = (old.autoPatchelfIgnoreMissingDeps or [ ])
-      ++ [ "libnvshmem.so.3" ];
-  });
-
-  python-env = pkgs.python3.withPackages (ps:
-    [
-      (ps.transformers.overridePythonAttrs (old: rec {
+  transformers-pin = pkgs.python3.override {
+    packageOverrides = self: super: {
+      bitsandbytes = super.bitsandbytes.overridePythonAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.ninja ];
+      });
+      transformers = super.transformers.overridePythonAttrs (old: {
         version = "4.54.1";
-        src = ps.fetchPypi {
+        src = super.fetchPypi {
           pname = "transformers";
-          inherit version;
-          hash = "";
+          version = "4.54.1";
+          hash = "sha256-slUbuXkD8TvZDJRn0KFE1Byk0ULe/ARKmVArt3xcEFI=";
         };
-      }))
-      torch-bin-custom
-      ps.flask
-    ] ++ pkgs.lib.optional (quantization_bits != null) ps.bitsandbytes);
+        doCheck = false;
+      });
+      tokenizers = super.tokenizers.overridePythonAttrs (old: rec {
+        version = "0.21.0";
+        src = pkgs.fetchFromGitHub {
+          owner = "huggingface";
+          repo = "tokenizers";
+          tag = "v${version}";
+          hash = "sha256-G65XiVlvJXOC9zqcVr9vWamUnpC0aa4kyYkE2v1K2iY=";
+        };
+        cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+          pname = "tokenizers";
+          inherit version src;
+          sourceRoot = "${src.name}/bindings/python";
+          hash = "sha256-jj5nuwxlfJm1ugYd5zW+wjyczOZHWCmRGYpmiMDqFlk=";
+        };
+        doCheck = false;
+      });
+      torch = super.torch-bin.overridePythonAttrs (old: {
+        passthru = (old.passthru or { }) // {
+          cudaSupport = true;
+          cudaPackages = pkgs.cudaPackages;
+          rocmSupport = false;
+          rocmPackages = { };
+        };
+      });
+    };
+  };
 
-  ouro-server-script = pkgs.writers.writePython3 "ouro-server" {
-    libraries = with python-env.pkgs;
-      [ transformers torch-bin-custom flask ]
-      ++ pkgs.lib.optional (quantization_bits != null)
-      python-env.pkgs.bitsandbytes;
-  } ''
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    ${pkgs.lib.optionalString (quantization_bits != null)
-    "from transformers import BitsAndBytesConfig"}
-    from flask import Flask, request, jsonify
-    import torch
+  ouro-server-script =
+    pkgs.writers.makePythonWriter transformers-pin # set interpreter
+    transformers-pin.pkgs # package set
+    transformers-pin.pkgs # build-time package set
+    "ouro-server" {
+      libraries = with transformers-pin.pkgs;
+        [ transformers accelerate torch-bin flask ]
+        ++ pkgs.lib.optionals (quantization_bits != null) [ bitsandbytes ];
+      flakeIgnore = [ "E501" "E302" "E305" ];
+    } ''
+      from transformers import AutoModelForCausalLM, AutoTokenizer
+      ${pkgs.lib.optionalString (quantization_bits != null)
+      "from transformers import BitsAndBytesConfig"}
+      from flask import Flask, request, jsonify
+      import torch
 
-    app = Flask(__name__)
+      app = Flask(__name__)
 
-    print(f"CUDA available: {torch.cuda.is_available()}")
+      print(f"CUDA available: {torch.cuda.is_available()}")
 
-    ${quantConfig}
+      ${quantConfig}
 
-    model = AutoModelForCausalLM.from_pretrained(
-        "${ouro-model}",
-        device_map="auto",
-        torch_dtype="auto",
-        ${modelLoadArgs}
-    )
-    tokenizer = AutoTokenizer.from_pretrained("${ouro-model}")
+      model = AutoModelForCausalLM.from_pretrained(
+          "${ouro-model}",
+          device_map="auto",
+          torch_dtype="auto",
+          trust_remote_code=True,
+          ${modelLoadArgs}
+      )
+      tokenizer = AutoTokenizer.from_pretrained("${ouro-model}")
 
-    @app.route('/generate', methods=['POST'])
-    def generate():
-        prompt = request.json.get('prompt', "")
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=100)
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return jsonify({"response": response})
+      @app.route('/generate', methods=['POST'])
+      def generate():
+          prompt = request.json.get('prompt', "")
+          inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+          outputs = model.generate(**inputs, max_new_tokens=100)
+          response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+          return jsonify({"response": response})
 
-    if __name__ == '__main__':
-        app.run(host='localhost', port=8000)
-  '';
+      if __name__ == '__main__':
+          app.run(host='localhost', port=8000)
+    '';
 
   ouro-query-script = pkgs.writeShellScript "ouro-query" ''
     PROMPT=$(cat)
