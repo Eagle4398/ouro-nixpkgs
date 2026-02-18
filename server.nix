@@ -86,9 +86,6 @@ in pkgs.stdenv.mkDerivation {
     cp ${ouro-server-script} $out/bin/ouro-server
     cp ${ouro-query-script} $out/bin/ouro-query
     chmod +x $out/bin/*
-    
-    wrapProgram $out/bin/ouro-server \
-      --prefix LD_LIBRARY_PATH : "${pkgs.cudaPackages.cudatoolkit}/lib"
   '';
 }
 
