@@ -9,7 +9,7 @@ let
     "1.4B" = {
       commit = "574fa66cb8bf5abdc979642d01cf2b79b16bfab1";
       repo = "ByteDance/Ouro-1.4B";
-      hash = "";
+      hash = "sha256-zB3Jo54pB7dh58tVLiiZGp+s15ztOsiDGSdKnACdPlQ=";
     };
   };
 
